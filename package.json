@@ -1,0 +1,14 @@
+{
+  "name": "devin-for-discord",
+  "version": "1.0.0",
+  "description": "Discord bot that brings Devin's autonomous coding capabilities to Discord",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.25.1",
+    "dotenv": "^16.4.7"
+  }
+}
