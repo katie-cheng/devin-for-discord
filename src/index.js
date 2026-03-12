@@ -13,8 +13,15 @@ import {
   TextInputStyle,
 } from 'discord.js';
 import { createSession, sendMessage, terminateSession, uploadAttachment } from './devin.js';
-import { SessionManager, TERMINAL_STATUSES } from './sessionManager.js';
+import { SessionManager } from './sessionManager.js';
 import { TEMPLATES, getTemplate } from './templates.js';
+import {
+  TERMINAL_STATUSES,
+  EMBED_COLORS,
+  EMBED_FOOTER_TEXT,
+  THREAD_AUTO_ARCHIVE_DURATION,
+  THREAD_NAME_MAX_LENGTH,
+} from './config.js';
 
 // --- Validate env ---
 const required = ['DISCORD_BOT_TOKEN', 'DISCORD_CLIENT_ID', 'DEVIN_API_KEY'];
@@ -224,15 +231,15 @@ async function handleMention(message) {
   console.log(`[Devin] Session created via @mention: ${session_id} — ${url}`);
 
   const thread = await channel.threads.create({
-    name: `Devin: ${task.slice(0, 90) || 'New session'}`,
-    autoArchiveDuration: 1440,
+    name: `Devin: ${task.slice(0, THREAD_NAME_MAX_LENGTH - 7) || 'New session'}`,
+    autoArchiveDuration: THREAD_AUTO_ARCHIVE_DURATION,
     reason: `Devin session ${session_id}`,
   });
 
   const embed = new EmbedBuilder()
     .setTitle('🤖 Devin Session Started')
     .setDescription(task || '*File attachment session*')
-    .setColor(0xFFAA00)
+    .setColor(EMBED_COLORS.working)
     .addFields(
       { name: 'Status', value: '🟡 Working', inline: true },
       { name: 'Session ID', value: `\`${session_id}\``, inline: true },
@@ -348,15 +355,15 @@ async function handleDevin(interaction) {
   console.log(`[Devin] Session created: ${session_id} — ${url}`);
 
   const thread = await channel.threads.create({
-    name: `Devin: ${task.slice(0, 90)}`,
-    autoArchiveDuration: 1440,
+    name: `Devin: ${task.slice(0, THREAD_NAME_MAX_LENGTH - 7)}`,
+    autoArchiveDuration: THREAD_AUTO_ARCHIVE_DURATION,
     reason: `Devin session ${session_id}`,
   });
 
   const embed = new EmbedBuilder()
     .setTitle('🤖 Devin Session Started')
     .setDescription(task)
-    .setColor(0xFFAA00)
+    .setColor(EMBED_COLORS.working)
     .addFields(
       { name: 'Status', value: '🟡 Working', inline: true },
       { name: 'Session ID', value: `\`${session_id}\``, inline: true },
@@ -465,15 +472,15 @@ async function handleTemplateSubmit(interaction) {
   console.log(`[Devin] Template session created: ${session_id} — ${url}`);
 
   const thread = await channel.threads.create({
-    name: threadName.slice(0, 100),
-    autoArchiveDuration: 1440,
+    name: threadName.slice(0, THREAD_NAME_MAX_LENGTH),
+    autoArchiveDuration: THREAD_AUTO_ARCHIVE_DURATION,
     reason: `Devin session ${session_id}`,
   });
 
   const embed = new EmbedBuilder()
     .setTitle(`🤖 ${template.name}`)
     .setDescription(prompt)
-    .setColor(0xFFAA00)
+    .setColor(EMBED_COLORS.working)
     .addFields(
       { name: 'Status', value: '🟡 Working', inline: true },
       { name: 'Session ID', value: `\`${session_id}\``, inline: true },
@@ -510,7 +517,7 @@ async function handleDevinReply(interaction) {
   const embed = new EmbedBuilder()
     .setTitle('💬 Message Sent to Devin')
     .setDescription(message)
-    .setColor(0x5865F2)
+    .setColor(EMBED_COLORS.devinMsg)
     .setTimestamp()
     .setFooter({ text: `Sent by ${interaction.user.tag}` });
 
@@ -545,9 +552,9 @@ async function handleDevinStop(interaction) {
   const embed = new EmbedBuilder()
     .setTitle('⏹️ Session Terminated')
     .setDescription(`Session \`${sessionId}\` has been terminated.`)
-    .setColor(0xCC0000)
+    .setColor(EMBED_COLORS.stopped)
     .setTimestamp()
-    .setFooter({ text: 'Devin for Discord' });
+    .setFooter({ text: EMBED_FOOTER_TEXT });
 
   await interaction.editReply({ embeds: [embed] });
 }
@@ -563,7 +570,7 @@ async function handleDevinSessions(interaction) {
 
   const embed = new EmbedBuilder()
     .setTitle('Active Devin Sessions')
-    .setColor(0x5865F2)
+    .setColor(EMBED_COLORS.devinMsg)
     .setDescription(
       sessions.map(s => {
         const shortId = s.sessionId.length > 8
@@ -573,7 +580,7 @@ async function handleDevinSessions(interaction) {
       }).join('\n')
     )
     .setTimestamp()
-    .setFooter({ text: 'Devin for Discord' });
+    .setFooter({ text: EMBED_FOOTER_TEXT });
 
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }
