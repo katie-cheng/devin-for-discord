@@ -27,7 +27,11 @@ for (const key of required) {
 
 // --- Client setup ---
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 const sessionManager = new SessionManager(client);
@@ -96,7 +100,7 @@ client.once('ready', async () => {
   }
 });
 
-// --- Handle interactions ---
+// --- Handle slash commands and component interactions ---
 const commandHandlers = {
   'devin': handleDevin,
   'devin-template': handleDevinTemplate,
@@ -126,6 +130,26 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// --- Handle @mentions and thread messages ---
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+
+  try {
+    const sessionId = sessionManager.getSessionByThread(message.channelId);
+
+    if (sessionId) {
+      // Message is in a session thread — forward to Devin or handle keyword
+      await handleThreadMessage(message, sessionId);
+    } else if (message.mentions.has(client.user)) {
+      // Bot was @mentioned in a channel — create a new session
+      await handleMention(message);
+    }
+  } catch (err) {
+    console.error('[Message] Error:', err);
+    await message.react('⚠️').catch(() => {});
+  }
+});
+
 // --- Helpers ---
 
 async function processAttachment(interaction) {
@@ -138,10 +162,129 @@ async function processAttachment(interaction) {
   return `\nATTACHMENT:"${fileUrl}"`;
 }
 
+async function processMessageAttachments(message) {
+  let lines = '';
+  for (const attachment of message.attachments.values()) {
+    const fileRes = await fetch(attachment.url);
+    const buffer = Buffer.from(await fileRes.arrayBuffer());
+    const fileUrl = await uploadAttachment(attachment.name, buffer);
+    lines += `\nATTACHMENT:"${fileUrl}"`;
+  }
+  return lines;
+}
+
 function resolveSessionId(interaction) {
   const explicit = interaction.options.getString('session_id');
   if (explicit) return explicit;
   return sessionManager.getSessionByThread(interaction.channelId);
+}
+
+function stripMention(content) {
+  return content.replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '').trim();
+}
+
+// --- @mention in a channel → create session ---
+async function handleMention(message) {
+  const channel = message.channel;
+  if (!channel?.threads) {
+    await message.reply('Tag me in a text channel to start a session!');
+    return;
+  }
+
+  const task = stripMention(message.content);
+  if (!task && message.attachments.size === 0) {
+    await message.reply('What would you like me to work on? Tag me with a task description.');
+    return;
+  }
+
+  await message.react('👀');
+
+  // Build prompt with any file attachments
+  const attachmentLines = await processMessageAttachments(message);
+  const prompt = (task || 'See attached files.') + attachmentLines;
+
+  const { session_id, url } = await createSession(prompt);
+  console.log(`[Devin] Session created via @mention: ${session_id} — ${url}`);
+
+  const thread = await channel.threads.create({
+    name: `Devin: ${task.slice(0, 90) || 'New session'}`,
+    autoArchiveDuration: 1440,
+    reason: `Devin session ${session_id}`,
+  });
+
+  const embed = new EmbedBuilder()
+    .setTitle('🤖 Devin Session Started')
+    .setDescription(task || '*File attachment session*')
+    .setColor(0xFFAA00)
+    .addFields(
+      { name: 'Status', value: '🟡 Working', inline: true },
+      { name: 'Session ID', value: `\`${session_id}\``, inline: true },
+      { name: 'View Session', value: `[Open in Devin](${url})` },
+    )
+    .setTimestamp()
+    .setFooter({ text: `Requested by ${message.author.tag}` });
+
+  if (message.attachments.size > 0) {
+    embed.addFields({
+      name: 'Attachments',
+      value: [...message.attachments.values()].map(a => a.name).join(', '),
+      inline: true,
+    });
+  }
+
+  await thread.send({ embeds: [embed] });
+  await message.reply(`Session started! Follow progress in ${thread}`);
+
+  sessionManager.track(session_id, thread.id, url, message.author.id, {
+    originalMessageId: message.id,
+    originalChannelId: message.channelId,
+  });
+}
+
+// --- Message in a session thread → forward to Devin or handle keyword ---
+async function handleThreadMessage(message, sessionId) {
+  const content = stripMention(message.content);
+  const lower = content.toLowerCase();
+
+  // Keywords
+  if (lower === 'exit') {
+    try {
+      await terminateSession(sessionId);
+    } catch (err) {
+      console.error(`[Thread] Failed to terminate session: ${err.message}`);
+    }
+    sessionManager.stopTracking(sessionId);
+    await message.react('⏹️');
+    return;
+  }
+
+  if (lower === 'mute') {
+    sessionManager.setMuted(sessionId, true);
+    await message.react('🔇');
+    return;
+  }
+
+  if (lower === 'unmute') {
+    sessionManager.setMuted(sessionId, false);
+    await message.react('🔊');
+    return;
+  }
+
+  // Aside — don't forward to Devin
+  if (lower.startsWith('!aside') || lower.startsWith('(aside)')) return;
+
+  // Don't forward if muted
+  if (sessionManager.isMuted(sessionId)) return;
+
+  // Nothing to send
+  if (!content && message.attachments.size === 0) return;
+
+  // Forward message + attachments to Devin
+  const attachmentLines = await processMessageAttachments(message);
+  const fullMessage = (content || '') + attachmentLines;
+
+  await sendMessage(sessionId, fullMessage);
+  await message.react('✉️');
 }
 
 // --- /devin ---
@@ -225,7 +368,6 @@ async function handleDevinTemplate(interaction) {
   });
 }
 
-// Template select menu → open modal form
 async function handleTemplateSelect(interaction) {
   const templateId = interaction.values[0];
   const template = getTemplate(templateId);
@@ -252,7 +394,6 @@ async function handleTemplateSelect(interaction) {
   await interaction.showModal(modal);
 }
 
-// Template modal submit → create Devin session
 async function handleTemplateSubmit(interaction) {
   const templateId = interaction.customId.replace('template-modal:', '');
   const template = getTemplate(templateId);
@@ -272,7 +413,6 @@ async function handleTemplateSubmit(interaction) {
 
   await interaction.deferReply();
 
-  // Extract field values from modal
   const fields = {};
   for (const field of template.fields) {
     fields[field.id] = interaction.fields.getTextInputValue(`field:${field.id}`) || '';

@@ -34,8 +34,9 @@ export class SessionManager {
 
   /**
    * Start tracking a Devin session — poll every 30s and post updates to the thread.
+   * opts.originalMessageId / opts.originalChannelId — for adding reactions to the trigger message.
    */
-  track(sessionId, threadId, devinUrl, userId) {
+  track(sessionId, threadId, devinUrl, userId, opts = {}) {
     this.sessions.set(sessionId, {
       threadId,
       devinUrl,
@@ -43,6 +44,9 @@ export class SessionManager {
       lastStatus: 'working',
       lastMessageCount: 0,
       lastPRUrl: null,
+      muted: false,
+      originalMessageId: opts.originalMessageId || null,
+      originalChannelId: opts.originalChannelId || null,
       interval: setInterval(() => this.poll(sessionId), POLL_INTERVAL_MS),
     });
   }
@@ -73,7 +77,6 @@ export class SessionManager {
     // --- New messages from Devin ---
     if (data.messages && data.messages.length > tracked.lastMessageCount) {
       const newMessages = data.messages.slice(tracked.lastMessageCount);
-      // Filter to only show Devin's messages (no user_id means it's from Devin)
       const devinMessages = newMessages.filter(m => !m.user_id);
 
       const toShow = devinMessages.slice(0, MAX_MESSAGES_PER_POLL);
@@ -98,7 +101,6 @@ export class SessionManager {
 
     // --- Status change ---
     if (status && status !== tracked.lastStatus) {
-      // Don't post a separate status embed for terminal states — handled below
       if (!TERMINAL_STATUSES.has(status)) {
         const display = getStatusDisplay(status);
         const embed = new EmbedBuilder()
@@ -110,7 +112,7 @@ export class SessionManager {
 
         if (status === 'blocked') {
           embed.setDescription(
-            `<@${tracked.userId}> Devin is blocked and may need input.\nReply with \`/devin-reply\` or [open session in Devin](${tracked.devinUrl})`
+            `<@${tracked.userId}> Devin is blocked and may need input.\nReply in this thread or [open session in Devin](${tracked.devinUrl})`
           );
         }
 
@@ -153,7 +155,25 @@ export class SessionManager {
       }
 
       await thread.send({ embeds: [embed] });
+
+      // React on the original trigger message (if created via @mention)
+      await this.reactOnOriginal(tracked, status === 'finished' ? '✅' : '❌');
+
       this.stopTracking(sessionId);
+    }
+  }
+
+  /**
+   * Add a reaction to the original message that triggered the session.
+   */
+  async reactOnOriginal(tracked, emoji) {
+    if (!tracked.originalMessageId) return;
+    try {
+      const channel = await this.client.channels.fetch(tracked.originalChannelId);
+      const message = await channel.messages.fetch(tracked.originalMessageId);
+      await message.react(emoji);
+    } catch (err) {
+      // Message may have been deleted — ignore
     }
   }
 
@@ -166,14 +186,20 @@ export class SessionManager {
     }
   }
 
-  /**
-   * Look up which session belongs to a thread (reverse lookup).
-   */
   getSessionByThread(threadId) {
     for (const [sessionId, data] of this.sessions.entries()) {
       if (data.threadId === threadId) return sessionId;
     }
     return null;
+  }
+
+  setMuted(sessionId, muted) {
+    const tracked = this.sessions.get(sessionId);
+    if (tracked) tracked.muted = muted;
+  }
+
+  isMuted(sessionId) {
+    return this.sessions.get(sessionId)?.muted ?? false;
   }
 
   getActiveSessions() {
