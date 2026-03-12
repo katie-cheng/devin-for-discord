@@ -1,8 +1,11 @@
 import { EmbedBuilder } from 'discord.js';
 import { getSession } from './devin.js';
 
-const POLL_INTERVAL_MS = 30_000;
+const FAST_POLL_MS = 5_000;
+const SLOW_POLL_MS = 15_000;
+const FAST_POLL_DURATION = 120_000;
 const TERMINAL_STATUSES = new Set(['finished', 'expired']);
+const WORKING_STATUSES = new Set(['working', 'resumed', 'resume_requested', 'resume_requested_frontend']);
 const MAX_MESSAGES_PER_POLL = 5;
 
 const STATUS_DISPLAY = {
@@ -26,19 +29,36 @@ function truncate(text, max) {
   return text.slice(0, max - 20) + '\n\n*[Truncated]*';
 }
 
+function formatElapsed(ms) {
+  const total = Math.floor(ms / 1000);
+  if (total < 60) return `${total}s`;
+  const min = Math.floor(total / 60);
+  const sec = total % 60;
+  if (min < 60) return `${min}m ${sec}s`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ${min % 60}m`;
+}
+
 export class SessionManager {
   constructor(client) {
     this.client = client;
-    this.sessions = new Map(); // session_id -> tracked state
+    this.sessions = new Map();
   }
 
   /**
-   * Start tracking a Devin session — poll every 30s and post updates to the thread.
-   * opts.originalMessageId / opts.originalChannelId — for adding reactions to the trigger message.
+   * Start tracking a session. Posts a "thinking" indicator, polls immediately,
+   * then adaptively (5s for first 2 min, 15s after).
    */
-  track(sessionId, threadId, devinUrl, userId, opts = {}) {
+  async track(sessionId, thread, devinUrl, userId, opts = {}) {
+    const thinkingEmbed = new EmbedBuilder()
+      .setDescription('💭 **Devin is thinking...**')
+      .setColor(0xFFAA00)
+      .setFooter({ text: 'Devin for Discord' });
+
+    const statusMessage = await thread.send({ embeds: [thinkingEmbed] });
+
     this.sessions.set(sessionId, {
-      threadId,
+      threadId: thread.id,
       devinUrl,
       userId,
       lastStatus: 'working',
@@ -47,8 +67,23 @@ export class SessionManager {
       muted: false,
       originalMessageId: opts.originalMessageId || null,
       originalChannelId: opts.originalChannelId || null,
-      interval: setInterval(() => this.poll(sessionId), POLL_INTERVAL_MS),
+      statusMessageId: statusMessage.id,
+      thinkingStart: Date.now(),
+      timeout: null,
     });
+
+    this.pollAndSchedule(sessionId);
+  }
+
+  async pollAndSchedule(sessionId) {
+    await this.poll(sessionId);
+
+    const tracked = this.sessions.get(sessionId);
+    if (!tracked) return;
+
+    const elapsed = Date.now() - tracked.thinkingStart;
+    const delay = elapsed < FAST_POLL_DURATION ? FAST_POLL_MS : SLOW_POLL_MS;
+    tracked.timeout = setTimeout(() => this.pollAndSchedule(sessionId), delay);
   }
 
   async poll(sessionId) {
@@ -60,14 +95,14 @@ export class SessionManager {
       data = await getSession(sessionId);
     } catch (err) {
       console.error(`[Poll] Error fetching session ${sessionId}: ${err.message}`);
-      return; // Don't crash — retry on next interval
+      return;
     }
 
     let thread;
     try {
       thread = await this.client.channels.fetch(tracked.threadId);
     } catch (err) {
-      console.error(`[Poll] Could not fetch thread ${tracked.threadId}: ${err.message}`);
+      console.error(`[Poll] Could not fetch thread: ${err.message}`);
       this.stopTracking(sessionId);
       return;
     }
@@ -79,14 +114,12 @@ export class SessionManager {
       const newMessages = data.messages.slice(tracked.lastMessageCount);
       const devinMessages = newMessages.filter(m => !m.user_id);
 
-      const toShow = devinMessages.slice(0, MAX_MESSAGES_PER_POLL);
-      for (const msg of toShow) {
+      for (const msg of devinMessages.slice(0, MAX_MESSAGES_PER_POLL)) {
         const embed = new EmbedBuilder()
           .setDescription(truncate(msg.message, 4000))
           .setColor(0x5865F2)
           .setTimestamp(new Date(msg.timestamp))
           .setFooter({ text: 'Devin for Discord' });
-
         await thread.send({ embeds: [embed] });
       }
 
@@ -97,29 +130,37 @@ export class SessionManager {
       }
 
       tracked.lastMessageCount = data.messages.length;
+
+      // Devin responded — finalize thinking indicator
+      if (tracked.statusMessageId && devinMessages.length > 0) {
+        await this.finalizeThinking(tracked, '✅ **Responded**', 0x00CC00);
+      }
     }
 
-    // --- Status change ---
+    // --- Status changes ---
     if (status && status !== tracked.lastStatus) {
-      if (!TERMINAL_STATUSES.has(status)) {
-        const display = getStatusDisplay(status);
+      // Devin resumed working → show new thinking indicator
+      if (WORKING_STATUSES.has(status) && !tracked.statusMessageId && !WORKING_STATUSES.has(tracked.lastStatus)) {
         const embed = new EmbedBuilder()
-          .setTitle(`${display.emoji} Status: ${display.label}`)
-          .setColor(display.color)
-          .addFields({ name: 'Session', value: `[View in Devin](${tracked.devinUrl})` })
-          .setTimestamp()
+          .setDescription('💭 **Devin is thinking...**')
+          .setColor(0xFFAA00)
           .setFooter({ text: 'Devin for Discord' });
+        const msg = await thread.send({ embeds: [embed] });
+        tracked.statusMessageId = msg.id;
+        tracked.thinkingStart = Date.now();
+      }
 
-        if (status === 'blocked') {
-          embed.setDescription(
-            `<@${tracked.userId}> Devin is blocked and may need input.\nReply in this thread or [open session in Devin](${tracked.devinUrl})`
-          );
-        }
-
-        await thread.send({ embeds: [embed] });
+      // Blocked — finalize thinking (don't post a "blocked" embed)
+      if (status === 'blocked' && tracked.statusMessageId) {
+        await this.finalizeThinking(tracked, '✅ **Responded**', 0x00CC00);
       }
 
       tracked.lastStatus = status;
+    }
+
+    // --- Update thinking timer (only while active) ---
+    if (tracked.statusMessageId) {
+      await this.updateThinking(tracked);
     }
 
     // --- PR created ---
@@ -130,7 +171,6 @@ export class SessionManager {
         .setDescription(`[View Pull Request](${data.pull_request.url})`)
         .setTimestamp()
         .setFooter({ text: 'Devin for Discord' });
-
       await thread.send({ embeds: [embed] });
       tracked.lastPRUrl = data.pull_request.url;
     }
@@ -141,31 +181,65 @@ export class SessionManager {
       const embed = new EmbedBuilder()
         .setTitle(`${display.emoji} Session ${display.label}`)
         .setColor(display.color)
-        .addFields(
-          { name: 'Session', value: `[View in Devin](${tracked.devinUrl})`, inline: true },
-        )
+        .addFields({ name: 'Session', value: `[View in Devin](${tracked.devinUrl})`, inline: true })
         .setTimestamp()
         .setFooter({ text: 'Devin for Discord' });
 
-      if (data.title) {
-        embed.setDescription(data.title);
-      }
+      if (data.title) embed.setDescription(data.title);
       if (data.pull_request?.url) {
         embed.addFields({ name: 'Pull Request', value: `[View PR](${data.pull_request.url})`, inline: true });
       }
 
       await thread.send({ embeds: [embed] });
 
-      // React on the original trigger message (if created via @mention)
-      await this.reactOnOriginal(tracked, status === 'finished' ? '✅' : '❌');
+      if (tracked.statusMessageId) {
+        const label = status === 'finished' ? '✅ **Finished**' : '❌ **Expired**';
+        const color = status === 'finished' ? 0x00CC00 : 0xCC0000;
+        await this.finalizeThinking(tracked, label, color);
+      }
 
+      await this.reactOnOriginal(tracked, status === 'finished' ? '✅' : '❌');
       this.stopTracking(sessionId);
     }
   }
 
   /**
-   * Add a reaction to the original message that triggered the session.
+   * Update the thinking indicator with elapsed time.
    */
+  async updateThinking(tracked) {
+    try {
+      const elapsed = Date.now() - tracked.thinkingStart;
+      const embed = new EmbedBuilder()
+        .setDescription(`💭 **Devin is thinking...** · ⏱️ ${formatElapsed(elapsed)}`)
+        .setColor(0xFFAA00)
+        .setFooter({ text: 'Devin for Discord' });
+      const thread = await this.client.channels.fetch(tracked.threadId);
+      const msg = await thread.messages.fetch(tracked.statusMessageId);
+      await msg.edit({ embeds: [embed] });
+    } catch (err) {
+      // Ignore — message may have been deleted
+    }
+  }
+
+  /**
+   * Finalize the thinking indicator — show completion state.
+   */
+  async finalizeThinking(tracked, label, color) {
+    try {
+      const elapsed = Date.now() - tracked.thinkingStart;
+      const embed = new EmbedBuilder()
+        .setDescription(`${label} · ⏱️ ${formatElapsed(elapsed)}`)
+        .setColor(color)
+        .setFooter({ text: 'Devin for Discord' });
+      const thread = await this.client.channels.fetch(tracked.threadId);
+      const msg = await thread.messages.fetch(tracked.statusMessageId);
+      await msg.edit({ embeds: [embed] });
+    } catch (err) {
+      // Ignore
+    }
+    tracked.statusMessageId = null;
+  }
+
   async reactOnOriginal(tracked, emoji) {
     if (!tracked.originalMessageId) return;
     try {
@@ -173,14 +247,29 @@ export class SessionManager {
       const message = await channel.messages.fetch(tracked.originalMessageId);
       await message.react(emoji);
     } catch (err) {
-      // Message may have been deleted — ignore
+      // Ignore
     }
+  }
+
+  /**
+   * User-initiated stop (EXIT, /devin-stop). Finalizes thinking + adds reaction.
+   */
+  async userStop(sessionId) {
+    const tracked = this.sessions.get(sessionId);
+    if (!tracked) return;
+
+    if (tracked.statusMessageId) {
+      await this.finalizeThinking(tracked, '⏹️ **Stopped**', 0xCC0000);
+    }
+
+    await this.reactOnOriginal(tracked, '⏹️');
+    this.stopTracking(sessionId);
   }
 
   stopTracking(sessionId) {
     const tracked = this.sessions.get(sessionId);
     if (tracked) {
-      clearInterval(tracked.interval);
+      clearTimeout(tracked.timeout);
       this.sessions.delete(sessionId);
       console.log(`[Sessions] Stopped tracking ${sessionId}`);
     }

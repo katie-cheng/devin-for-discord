@@ -235,7 +235,7 @@ async function handleMention(message) {
   await thread.send({ embeds: [embed] });
   await message.reply(`Session started! Follow progress in ${thread}`);
 
-  sessionManager.track(session_id, thread.id, url, message.author.id, {
+  await sessionManager.track(session_id, thread, url, message.author.id, {
     originalMessageId: message.id,
     originalChannelId: message.channelId,
   });
@@ -253,7 +253,7 @@ async function handleThreadMessage(message, sessionId) {
     } catch (err) {
       console.error(`[Thread] Failed to terminate session: ${err.message}`);
     }
-    sessionManager.stopTracking(sessionId);
+    await sessionManager.userStop(sessionId);
     await message.react('⏹️');
     return;
   }
@@ -334,7 +334,7 @@ async function handleDevin(interaction) {
   await thread.send({ embeds: [embed] });
   await interaction.editReply(`Session started! Follow progress in ${thread}`);
 
-  sessionManager.track(session_id, thread.id, url, interaction.user.id);
+  await sessionManager.track(session_id, thread, url, interaction.user.id);
 }
 
 // --- /devin-template ---
@@ -446,7 +446,7 @@ async function handleTemplateSubmit(interaction) {
   await thread.send({ embeds: [embed] });
   await interaction.editReply(`Session started! Follow progress in ${thread}`);
 
-  sessionManager.track(session_id, thread.id, url, interaction.user.id);
+  await sessionManager.track(session_id, thread, url, interaction.user.id);
 }
 
 // --- /devin-reply ---
@@ -497,7 +497,7 @@ async function handleDevinStop(interaction) {
   await interaction.deferReply();
 
   await terminateSession(sessionId);
-  sessionManager.stopTracking(sessionId);
+  await sessionManager.userStop(sessionId);
 
   const embed = new EmbedBuilder()
     .setTitle('⏹️ Session Terminated')
