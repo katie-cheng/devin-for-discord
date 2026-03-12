@@ -1,23 +1,32 @@
 const BASE_URL = 'https://api.devin.ai/v1';
 
 async function request(method, path, body = null) {
-  const options = {
-    method,
-    headers: {
-      'Authorization': `Bearer ${process.env.DEVIN_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+  const headers = {
+    'Authorization': `Bearer ${process.env.DEVIN_API_KEY}`,
   };
-  if (body) options.body = JSON.stringify(body);
+
+  const options = { method, headers };
+
+  if (body) {
+    headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(body);
+  }
 
   const res = await fetch(`${BASE_URL}${path}`, options);
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Devin API ${method} ${path} failed (${res.status}): ${text}`);
+    const errText = await res.text();
+    throw new Error(`Devin API ${method} ${path} failed (${res.status}): ${errText}`);
   }
 
-  return res.json();
+  const text = await res.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 /**
@@ -73,5 +82,8 @@ export async function uploadAttachment(filename, buffer) {
     throw new Error(`Devin API attachment upload failed (${res.status}): ${text}`);
   }
 
-  return res.json(); // Returns the file URL as a string
+  const data = await res.json();
+  if (typeof data === 'string') return data;
+  if (data && typeof data.url === 'string') return data.url;
+  throw new Error(`Unexpected attachment upload response: ${JSON.stringify(data)}`);
 }

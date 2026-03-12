@@ -50,6 +50,11 @@ export class SessionManager {
    * then adaptively (5s for first 2 min, 15s after).
    */
   async track(sessionId, thread, devinUrl, userId, opts = {}) {
+    // Clear any existing tracking for this session to prevent timer leaks
+    if (this.sessions.has(sessionId)) {
+      this.stopTracking(sessionId);
+    }
+
     const thinkingEmbed = new EmbedBuilder()
       .setDescription('💭 **Devin is thinking...**')
       .setColor(0xFFAA00)
@@ -114,19 +119,22 @@ export class SessionManager {
       const newMessages = data.messages.slice(tracked.lastMessageCount);
       const devinMessages = newMessages.filter(m => !m.user_id);
 
-      for (const msg of devinMessages.slice(0, MAX_MESSAGES_PER_POLL)) {
+      // Show the most recent messages when truncating
+      const skipped = Math.max(0, devinMessages.length - MAX_MESSAGES_PER_POLL);
+      if (skipped > 0) {
+        await thread.send({
+          content: `*${skipped} earlier update(s) skipped — [view full session](${tracked.devinUrl})*`,
+        });
+      }
+
+      for (const msg of devinMessages.slice(-MAX_MESSAGES_PER_POLL)) {
+        const timestamp = msg.timestamp ? new Date(msg.timestamp) : new Date();
         const embed = new EmbedBuilder()
           .setDescription(truncate(msg.message, 4000))
           .setColor(0x5865F2)
-          .setTimestamp(new Date(msg.timestamp))
+          .setTimestamp(timestamp)
           .setFooter({ text: 'Devin for Discord' });
         await thread.send({ embeds: [embed] });
-      }
-
-      if (devinMessages.length > MAX_MESSAGES_PER_POLL) {
-        await thread.send({
-          content: `*+ ${devinMessages.length - MAX_MESSAGES_PER_POLL} more update(s) — [view full session](${tracked.devinUrl})*`,
-        });
       }
 
       tracked.lastMessageCount = data.messages.length;
@@ -276,6 +284,12 @@ export class SessionManager {
       clearTimeout(tracked.timeout);
       this.sessions.delete(sessionId);
       console.log(`[Sessions] Stopped tracking ${sessionId}`);
+    }
+  }
+
+  stopAll() {
+    for (const sessionId of this.sessions.keys()) {
+      this.stopTracking(sessionId);
     }
   }
 

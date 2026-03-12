@@ -156,7 +156,15 @@ async function processAttachment(interaction) {
   const attachment = interaction.options.getAttachment('attachment');
   if (!attachment) return '';
 
-  const fileRes = await fetch(attachment.url);
+  let fileRes;
+  try {
+    fileRes = await fetch(attachment.url);
+    if (!fileRes.ok) throw new Error(`HTTP ${fileRes.status}`);
+  } catch (err) {
+    console.error(`[Attachment] Failed to download ${attachment.name}: ${err.message}`);
+    return `\n(Failed to download attachment: ${attachment.name})`;
+  }
+
   const buffer = Buffer.from(await fileRes.arrayBuffer());
   const fileUrl = await uploadAttachment(attachment.name, buffer);
   return `\nATTACHMENT:"${fileUrl}"`;
@@ -165,7 +173,16 @@ async function processAttachment(interaction) {
 async function processMessageAttachments(message) {
   let lines = '';
   for (const attachment of message.attachments.values()) {
-    const fileRes = await fetch(attachment.url);
+    let fileRes;
+    try {
+      fileRes = await fetch(attachment.url);
+      if (!fileRes.ok) throw new Error(`HTTP ${fileRes.status}`);
+    } catch (err) {
+      console.error(`[Attachment] Failed to download ${attachment.name}: ${err.message}`);
+      lines += `\n(Failed to download attachment: ${attachment.name})`;
+      continue;
+    }
+
     const buffer = Buffer.from(await fileRes.arrayBuffer());
     const fileUrl = await uploadAttachment(attachment.name, buffer);
     lines += `\nATTACHMENT:"${fileUrl}"`;
@@ -518,7 +535,11 @@ async function handleDevinStop(interaction) {
 
   await interaction.deferReply();
 
-  await terminateSession(sessionId);
+  try {
+    await terminateSession(sessionId);
+  } catch (err) {
+    console.error(`[Stop] Failed to terminate session ${sessionId}: ${err.message}`);
+  }
   await sessionManager.userStop(sessionId);
 
   const embed = new EmbedBuilder()
@@ -544,9 +565,12 @@ async function handleDevinSessions(interaction) {
     .setTitle('Active Devin Sessions')
     .setColor(0x5865F2)
     .setDescription(
-      sessions.map(s =>
-        `• \`${s.sessionId.slice(0, 8)}…\` — ${s.status} — <#${s.threadId}>`
-      ).join('\n')
+      sessions.map(s => {
+        const shortId = s.sessionId.length > 8
+          ? s.sessionId.slice(0, 8) + '…'
+          : s.sessionId;
+        return `• \`${shortId}\` — ${s.status} — <#${s.threadId}>`;
+      }).join('\n')
     )
     .setTimestamp()
     .setFooter({ text: 'Devin for Discord' });
@@ -560,6 +584,7 @@ client.login(process.env.DISCORD_BOT_TOKEN);
 // --- Graceful shutdown ---
 function shutdown() {
   console.log('\nShutting down...');
+  sessionManager.stopAll();
   client.destroy();
   process.exit(0);
 }
