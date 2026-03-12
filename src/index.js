@@ -6,9 +6,15 @@ import {
   Routes,
   SlashCommandBuilder,
   EmbedBuilder,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from 'discord.js';
 import { createSession, sendMessage, terminateSession, uploadAttachment } from './devin.js';
 import { SessionManager } from './sessionManager.js';
+import { TEMPLATES, getTemplate } from './templates.js';
 
 // --- Validate env ---
 const required = ['DISCORD_BOT_TOKEN', 'DISCORD_CLIENT_ID', 'DEVIN_API_KEY'];
@@ -41,6 +47,9 @@ const commands = [
         .setDescription('File for Devin to work with')
         .setRequired(false)
     ),
+  new SlashCommandBuilder()
+    .setName('devin-template')
+    .setDescription('Start a Devin session from a template'),
   new SlashCommandBuilder()
     .setName('devin-reply')
     .setDescription('Send a message to a Devin session')
@@ -78,7 +87,6 @@ client.once('ready', async () => {
 
   const rest = new REST().setToken(process.env.DISCORD_BOT_TOKEN);
 
-  // Register guild commands (instant updates — ideal for development)
   for (const guild of client.guilds.cache.values()) {
     await rest.put(
       Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, guild.id),
@@ -89,23 +97,26 @@ client.once('ready', async () => {
 });
 
 // --- Handle interactions ---
-const handlers = {
+const commandHandlers = {
   'devin': handleDevin,
+  'devin-template': handleDevinTemplate,
   'devin-reply': handleDevinReply,
   'devin-stop': handleDevinStop,
   'devin-sessions': handleDevinSessions,
 };
 
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const handler = handlers[interaction.commandName];
-  if (!handler) return;
-
   try {
-    await handler(interaction);
+    if (interaction.isChatInputCommand()) {
+      const handler = commandHandlers[interaction.commandName];
+      if (handler) await handler(interaction);
+    } else if (interaction.isStringSelectMenu() && interaction.customId === 'template-select') {
+      await handleTemplateSelect(interaction);
+    } else if (interaction.isModalSubmit() && interaction.customId.startsWith('template-modal:')) {
+      await handleTemplateSubmit(interaction);
+    }
   } catch (err) {
-    console.error(`[Command] Error handling /${interaction.commandName}:`, err);
+    console.error('[Interaction] Error:', err);
     const reply = { content: `Something went wrong: ${err.message}`, ephemeral: true };
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply(reply).catch(() => {});
@@ -117,10 +128,6 @@ client.on('interactionCreate', async (interaction) => {
 
 // --- Helpers ---
 
-/**
- * If the user attached a file, upload it to Devin and return the ATTACHMENT line.
- * Returns empty string if no attachment.
- */
 async function processAttachment(interaction) {
   const attachment = interaction.options.getAttachment('attachment');
   if (!attachment) return '';
@@ -131,25 +138,16 @@ async function processAttachment(interaction) {
   return `\nATTACHMENT:"${fileUrl}"`;
 }
 
-/**
- * Resolve session ID from explicit option or auto-detect from thread.
- * Returns session ID or null (with error reply sent).
- */
 function resolveSessionId(interaction) {
   const explicit = interaction.options.getString('session_id');
   if (explicit) return explicit;
-
-  const fromThread = sessionManager.getSessionByThread(interaction.channelId);
-  if (fromThread) return fromThread;
-
-  return null;
+  return sessionManager.getSessionByThread(interaction.channelId);
 }
 
 // --- /devin ---
 async function handleDevin(interaction) {
   const task = interaction.options.getString('task');
 
-  // Must be used in a regular text channel (not a thread or DM)
   const channel = interaction.channel;
   if (!channel?.threads) {
     await interaction.reply({
@@ -161,22 +159,18 @@ async function handleDevin(interaction) {
 
   await interaction.deferReply();
 
-  // Handle optional attachment
   const attachmentLine = await processAttachment(interaction);
   const prompt = task + attachmentLine;
 
-  // Create the Devin session
   const { session_id, url } = await createSession(prompt);
   console.log(`[Devin] Session created: ${session_id} — ${url}`);
 
-  // Create a thread for this session
   const thread = await channel.threads.create({
     name: `Devin: ${task.slice(0, 90)}`,
     autoArchiveDuration: 1440,
     reason: `Devin session ${session_id}`,
   });
 
-  // Post initial embed in the thread
   const embed = new EmbedBuilder()
     .setTitle('🤖 Devin Session Started')
     .setDescription(task)
@@ -197,7 +191,121 @@ async function handleDevin(interaction) {
   await thread.send({ embeds: [embed] });
   await interaction.editReply(`Session started! Follow progress in ${thread}`);
 
-  // Start polling for updates
+  sessionManager.track(session_id, thread.id, url, interaction.user.id);
+}
+
+// --- /devin-template ---
+async function handleDevinTemplate(interaction) {
+  const channel = interaction.channel;
+  if (!channel?.threads) {
+    await interaction.reply({
+      content: 'This command must be used in a text channel, not inside a thread or DM.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId('template-select')
+    .setPlaceholder('Choose a template...')
+    .addOptions(
+      TEMPLATES.map(t => ({
+        label: t.name,
+        description: t.description,
+        value: t.id,
+        emoji: t.emoji,
+      }))
+    );
+
+  const row = new ActionRowBuilder().addComponents(selectMenu);
+  await interaction.reply({
+    content: '**What would you like Devin to help with?**',
+    components: [row],
+    ephemeral: true,
+  });
+}
+
+// Template select menu → open modal form
+async function handleTemplateSelect(interaction) {
+  const templateId = interaction.values[0];
+  const template = getTemplate(templateId);
+  if (!template) {
+    await interaction.reply({ content: 'Unknown template.', ephemeral: true });
+    return;
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`template-modal:${templateId}`)
+    .setTitle(`Devin: ${template.name}`);
+
+  for (const field of template.fields) {
+    const input = new TextInputBuilder()
+      .setCustomId(`field:${field.id}`)
+      .setLabel(field.label)
+      .setPlaceholder(field.placeholder || '')
+      .setStyle(field.short ? TextInputStyle.Short : TextInputStyle.Paragraph)
+      .setRequired(field.required);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+  }
+
+  await interaction.showModal(modal);
+}
+
+// Template modal submit → create Devin session
+async function handleTemplateSubmit(interaction) {
+  const templateId = interaction.customId.replace('template-modal:', '');
+  const template = getTemplate(templateId);
+  if (!template) {
+    await interaction.reply({ content: 'Unknown template.', ephemeral: true });
+    return;
+  }
+
+  const channel = interaction.channel || await client.channels.fetch(interaction.channelId);
+  if (!channel?.threads) {
+    await interaction.reply({
+      content: 'Could not create a thread here. Use /devin-template in a text channel.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply();
+
+  // Extract field values from modal
+  const fields = {};
+  for (const field of template.fields) {
+    fields[field.id] = interaction.fields.getTextInputValue(`field:${field.id}`) || '';
+  }
+
+  const prompt = template.buildPrompt(fields);
+  const mainDetail = fields.details || fields.url || fields.repo || '';
+  const threadName = `Devin: ${template.emoji} ${template.name} — ${mainDetail}`;
+
+  const { session_id, url } = await createSession(prompt);
+  console.log(`[Devin] Template session created: ${session_id} — ${url}`);
+
+  const thread = await channel.threads.create({
+    name: threadName.slice(0, 100),
+    autoArchiveDuration: 1440,
+    reason: `Devin session ${session_id}`,
+  });
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🤖 ${template.name}`)
+    .setDescription(prompt)
+    .setColor(0xFFAA00)
+    .addFields(
+      { name: 'Status', value: '🟡 Working', inline: true },
+      { name: 'Session ID', value: `\`${session_id}\``, inline: true },
+      { name: 'View Session', value: `[Open in Devin](${url})` },
+    )
+    .setTimestamp()
+    .setFooter({ text: `Requested by ${interaction.user.tag}` });
+
+  await thread.send({ embeds: [embed] });
+  await interaction.editReply(`Session started! Follow progress in ${thread}`);
+
   sessionManager.track(session_id, thread.id, url, interaction.user.id);
 }
 
@@ -220,7 +328,6 @@ async function handleDevinReply(interaction) {
 
   await sendMessage(sessionId, fullMessage);
 
-  // Confirm in the thread
   const embed = new EmbedBuilder()
     .setTitle('💬 Message Sent to Devin')
     .setDescription(message)
