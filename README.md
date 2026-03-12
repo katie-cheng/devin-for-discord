@@ -51,7 +51,7 @@ The bot reacts with 👀, creates a Devin session, and opens a thread for the co
 | `/devin-stop` | Terminate a session (use in a session thread) |
 | `/devin-sessions` | List all active sessions being tracked |
 
-`/devin`, `/devin-reply`, and `/devin-stop` support an optional `session_id` parameter (auto-detected when used inside a session thread). `/devin` and `/devin-reply` also accept optional file attachments.
+`/devin-reply` and `/devin-stop` support an optional `session_id` parameter (auto-detected when used inside a session thread). `/devin` and `/devin-reply` also accept optional file attachments.
 
 ### Thread conversation
 
@@ -98,14 +98,15 @@ Session threads use color-coded embeds:
 | Finished | 🟢 Green | Task complete |
 | Expired | 🔴 Red | Session expired |
 
-For sessions started via `@Devin`, the bot also adds reactions to the original message:
+For sessions started via `@Devin`, the bot adds reactions to the original message:
 
 | Reaction | Meaning |
 |----------|---------|
 | 👀 | Session created |
-| ✉️ | Thread message forwarded to Devin |
 | ✅ | Session finished |
 | ❌ | Session expired or failed |
+
+Thread messages that are forwarded to Devin receive a ✉️ reaction.
 
 ## Architecture
 
