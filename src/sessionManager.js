@@ -37,7 +37,12 @@ export class SessionManager {
    * opts.originalMessageId / opts.originalChannelId — for adding reactions to the trigger message.
    */
   track(sessionId, threadId, devinUrl, userId, opts = {}) {
-    this.sessions.set(sessionId, {
+    // Clear any existing tracking for this session to prevent interval leaks
+    if (this.sessions.has(sessionId)) {
+      this.stopTracking(sessionId);
+    }
+
+    const tracked = {
       threadId,
       devinUrl,
       userId,
@@ -45,10 +50,26 @@ export class SessionManager {
       lastMessageCount: 0,
       lastPRUrl: null,
       muted: false,
+      polling: false,
       originalMessageId: opts.originalMessageId || null,
       originalChannelId: opts.originalChannelId || null,
-      interval: setInterval(() => this.poll(sessionId), POLL_INTERVAL_MS),
-    });
+      timeout: null,
+    };
+
+    this.sessions.set(sessionId, tracked);
+    this._schedulePoll(sessionId);
+  }
+
+  _schedulePoll(sessionId) {
+    const tracked = this.sessions.get(sessionId);
+    if (!tracked) return;
+    tracked.timeout = setTimeout(async () => {
+      await this.poll(sessionId);
+      // Schedule next poll only if still tracked (not stopped during poll)
+      if (this.sessions.has(sessionId)) {
+        this._schedulePoll(sessionId);
+      }
+    }, POLL_INTERVAL_MS);
   }
 
   async poll(sessionId) {
@@ -79,21 +100,24 @@ export class SessionManager {
       const newMessages = data.messages.slice(tracked.lastMessageCount);
       const devinMessages = newMessages.filter(m => !m.user_id);
 
-      const toShow = devinMessages.slice(0, MAX_MESSAGES_PER_POLL);
+      // Show the most recent messages (not the oldest) when truncating
+      const skipped = Math.max(0, devinMessages.length - MAX_MESSAGES_PER_POLL);
+      if (skipped > 0) {
+        await thread.send({
+          content: `*${skipped} earlier update(s) skipped — [view full session](${tracked.devinUrl})*`,
+        });
+      }
+
+      const toShow = devinMessages.slice(-MAX_MESSAGES_PER_POLL);
       for (const msg of toShow) {
+        const timestamp = msg.timestamp ? new Date(msg.timestamp) : new Date();
         const embed = new EmbedBuilder()
           .setDescription(truncate(msg.message, 4000))
           .setColor(0x5865F2)
-          .setTimestamp(new Date(msg.timestamp))
+          .setTimestamp(timestamp)
           .setFooter({ text: 'Devin for Discord' });
 
         await thread.send({ embeds: [embed] });
-      }
-
-      if (devinMessages.length > MAX_MESSAGES_PER_POLL) {
-        await thread.send({
-          content: `*+ ${devinMessages.length - MAX_MESSAGES_PER_POLL} more update(s) — [view full session](${tracked.devinUrl})*`,
-        });
       }
 
       tracked.lastMessageCount = data.messages.length;
@@ -180,9 +204,15 @@ export class SessionManager {
   stopTracking(sessionId) {
     const tracked = this.sessions.get(sessionId);
     if (tracked) {
-      clearInterval(tracked.interval);
+      clearTimeout(tracked.timeout);
       this.sessions.delete(sessionId);
       console.log(`[Sessions] Stopped tracking ${sessionId}`);
+    }
+  }
+
+  stopAll() {
+    for (const sessionId of this.sessions.keys()) {
+      this.stopTracking(sessionId);
     }
   }
 
