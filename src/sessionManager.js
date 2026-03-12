@@ -4,7 +4,7 @@ import { getSession } from './devin.js';
 const FAST_POLL_MS = 5_000;
 const SLOW_POLL_MS = 15_000;
 const FAST_POLL_DURATION = 120_000;
-const TERMINAL_STATUSES = new Set(['finished', 'expired']);
+export const TERMINAL_STATUSES = new Set(['finished', 'expired']);
 const WORKING_STATUSES = new Set(['working', 'resumed', 'resume_requested', 'resume_requested_frontend']);
 const MAX_MESSAGES_PER_POLL = 5;
 
@@ -247,8 +247,12 @@ export class SessionManager {
       const message = await channel.messages.fetch(tracked.originalMessageId);
       await message.react(emoji);
     } catch (err) {
-      // Ignore
+      console.warn(`[Sessions] Could not react on original message: ${err.message}`);
     }
+  }
+
+  getTracked(sessionId) {
+    return this.sessions.get(sessionId);
   }
 
   /**

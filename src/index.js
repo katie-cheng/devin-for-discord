@@ -13,7 +13,7 @@ import {
   TextInputStyle,
 } from 'discord.js';
 import { createSession, sendMessage, terminateSession, uploadAttachment } from './devin.js';
-import { SessionManager } from './sessionManager.js';
+import { SessionManager, TERMINAL_STATUSES } from './sessionManager.js';
 import { TEMPLATES, getTemplate } from './templates.js';
 
 // --- Validate env ---
@@ -232,22 +232,27 @@ async function handleMention(message) {
     });
   }
 
-  await thread.send({ embeds: [embed] });
-  await message.reply(`Session started! Follow progress in ${thread}`);
-
   await sessionManager.track(session_id, thread, url, message.author.id, {
     originalMessageId: message.id,
     originalChannelId: message.channelId,
   });
+
+  await thread.send({ embeds: [embed] });
+  await message.reply(`Session started! Follow progress in ${thread}`);
 }
 
 // --- Message in a session thread → forward to Devin or handle keyword ---
 async function handleThreadMessage(message, sessionId) {
   const content = stripMention(message.content);
   const lower = content.toLowerCase();
+  const tracked = sessionManager.getTracked(sessionId);
 
-  // Keywords
+  // Keywords that require session ownership
   if (lower === 'exit') {
+    if (tracked && message.author.id !== tracked.userId) {
+      await message.react('🚫');
+      return;
+    }
     try {
       await terminateSession(sessionId);
     } catch (err) {
@@ -259,12 +264,20 @@ async function handleThreadMessage(message, sessionId) {
   }
 
   if (lower === 'mute') {
+    if (tracked && message.author.id !== tracked.userId) {
+      await message.react('🚫');
+      return;
+    }
     sessionManager.setMuted(sessionId, true);
     await message.react('🔇');
     return;
   }
 
   if (lower === 'unmute') {
+    if (tracked && message.author.id !== tracked.userId) {
+      await message.react('🚫');
+      return;
+    }
     sessionManager.setMuted(sessionId, false);
     await message.react('🔊');
     return;
@@ -273,8 +286,17 @@ async function handleThreadMessage(message, sessionId) {
   // Aside — don't forward to Devin
   if (lower.startsWith('!aside') || lower.startsWith('(aside)')) return;
 
-  // Don't forward if muted
-  if (sessionManager.isMuted(sessionId)) return;
+  // Don't forward if muted — react to indicate
+  if (sessionManager.isMuted(sessionId)) {
+    await message.react('🔇');
+    return;
+  }
+
+  // Don't forward if session is in a terminal state
+  if (tracked && TERMINAL_STATUSES.has(tracked.lastStatus)) {
+    await message.react('⚠️');
+    return;
+  }
 
   // Nothing to send
   if (!content && message.attachments.size === 0) return;
@@ -331,10 +353,10 @@ async function handleDevin(interaction) {
     embed.addFields({ name: 'Attachment', value: attachment.name, inline: true });
   }
 
+  await sessionManager.track(session_id, thread, url, interaction.user.id);
+
   await thread.send({ embeds: [embed] });
   await interaction.editReply(`Session started! Follow progress in ${thread}`);
-
-  await sessionManager.track(session_id, thread, url, interaction.user.id);
 }
 
 // --- /devin-template ---
@@ -443,10 +465,10 @@ async function handleTemplateSubmit(interaction) {
     .setTimestamp()
     .setFooter({ text: `Requested by ${interaction.user.tag}` });
 
+  await sessionManager.track(session_id, thread, url, interaction.user.id);
+
   await thread.send({ embeds: [embed] });
   await interaction.editReply(`Session started! Follow progress in ${thread}`);
-
-  await sessionManager.track(session_id, thread, url, interaction.user.id);
 }
 
 // --- /devin-reply ---
