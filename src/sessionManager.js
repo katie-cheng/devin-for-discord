@@ -50,7 +50,6 @@ export class SessionManager {
       lastMessageCount: 0,
       lastPRUrl: null,
       muted: false,
-      polling: false,
       originalMessageId: opts.originalMessageId || null,
       originalChannelId: opts.originalChannelId || null,
       timeout: null,
