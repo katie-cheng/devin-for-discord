@@ -1,4 +1,6 @@
-const BASE_URL = 'https://api.devin.ai/v1';
+import { DEVIN_API_BASE_URL } from './config.js';
+
+const BASE_URL = DEVIN_API_BASE_URL;
 
 async function request(method, path, body = null) {
   const headers = {

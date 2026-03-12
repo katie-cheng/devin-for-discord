@@ -1,27 +1,20 @@
 import { EmbedBuilder } from 'discord.js';
 import { getSession } from './devin.js';
-
-const FAST_POLL_MS = 5_000;
-const SLOW_POLL_MS = 15_000;
-const FAST_POLL_DURATION = 120_000;
-export const TERMINAL_STATUSES = new Set(['finished', 'expired']);
-const WORKING_STATUSES = new Set(['working', 'resumed', 'resume_requested', 'resume_requested_frontend']);
-const MAX_MESSAGES_PER_POLL = 5;
-
-const STATUS_DISPLAY = {
-  working:   { color: 0xFFAA00, emoji: '🟡', label: 'Working' },
-  blocked:   { color: 0xFF6600, emoji: '🟠', label: 'Blocked' },
-  finished:  { color: 0x00CC00, emoji: '🟢', label: 'Finished' },
-  expired:   { color: 0xCC0000, emoji: '🔴', label: 'Expired' },
-  resumed:   { color: 0xFFAA00, emoji: '🟡', label: 'Resumed' },
-  suspend_requested:          { color: 0x888888, emoji: '⏸️', label: 'Suspending' },
-  suspend_requested_frontend: { color: 0x888888, emoji: '⏸️', label: 'Suspending' },
-  resume_requested:           { color: 0xFFAA00, emoji: '▶️', label: 'Resuming' },
-  resume_requested_frontend:  { color: 0xFFAA00, emoji: '▶️', label: 'Resuming' },
-};
+import {
+  FAST_POLL_MS,
+  SLOW_POLL_MS,
+  FAST_POLL_DURATION,
+  MAX_MESSAGES_PER_POLL,
+  TERMINAL_STATUSES,
+  WORKING_STATUSES,
+  STATUS_DISPLAY,
+  EMBED_COLORS,
+  EMBED_FOOTER_TEXT,
+  MAX_EMBED_DESCRIPTION_LENGTH,
+} from './config.js';
 
 function getStatusDisplay(status) {
-  return STATUS_DISPLAY[status] || { color: 0x888888, emoji: '⚪', label: status };
+  return STATUS_DISPLAY[status] || { color: EMBED_COLORS.default, emoji: '⚪', label: status };
 }
 
 function truncate(text, max) {
@@ -57,8 +50,8 @@ export class SessionManager {
 
     const thinkingEmbed = new EmbedBuilder()
       .setDescription('💭 **Devin is thinking...**')
-      .setColor(0xFFAA00)
-      .setFooter({ text: 'Devin for Discord' });
+      .setColor(EMBED_COLORS.working)
+      .setFooter({ text: EMBED_FOOTER_TEXT });
 
     const statusMessage = await thread.send({ embeds: [thinkingEmbed] });
 
@@ -130,10 +123,10 @@ export class SessionManager {
       for (const msg of devinMessages.slice(-MAX_MESSAGES_PER_POLL)) {
         const timestamp = msg.timestamp ? new Date(msg.timestamp) : new Date();
         const embed = new EmbedBuilder()
-          .setDescription(truncate(msg.message, 4000))
-          .setColor(0x5865F2)
+          .setDescription(truncate(msg.message, MAX_EMBED_DESCRIPTION_LENGTH))
+          .setColor(EMBED_COLORS.devinMsg)
           .setTimestamp(timestamp)
-          .setFooter({ text: 'Devin for Discord' });
+          .setFooter({ text: EMBED_FOOTER_TEXT });
         await thread.send({ embeds: [embed] });
       }
 
@@ -141,7 +134,7 @@ export class SessionManager {
 
       // Devin responded — finalize thinking indicator
       if (tracked.statusMessageId && devinMessages.length > 0) {
-        await this.finalizeThinking(tracked, '✅ **Responded**', 0x00CC00);
+        await this.finalizeThinking(tracked, '✅ **Responded**', EMBED_COLORS.finished);
       }
     }
 
@@ -151,8 +144,8 @@ export class SessionManager {
       if (WORKING_STATUSES.has(status) && !tracked.statusMessageId && !WORKING_STATUSES.has(tracked.lastStatus)) {
         const embed = new EmbedBuilder()
           .setDescription('💭 **Devin is thinking...**')
-          .setColor(0xFFAA00)
-          .setFooter({ text: 'Devin for Discord' });
+          .setColor(EMBED_COLORS.working)
+          .setFooter({ text: EMBED_FOOTER_TEXT });
         const msg = await thread.send({ embeds: [embed] });
         tracked.statusMessageId = msg.id;
         tracked.thinkingStart = Date.now();
@@ -160,7 +153,7 @@ export class SessionManager {
 
       // Blocked — finalize thinking (don't post a "blocked" embed)
       if (status === 'blocked' && tracked.statusMessageId) {
-        await this.finalizeThinking(tracked, '✅ **Responded**', 0x00CC00);
+        await this.finalizeThinking(tracked, '✅ **Responded**', EMBED_COLORS.finished);
       }
 
       tracked.lastStatus = status;
@@ -175,10 +168,10 @@ export class SessionManager {
     if (data.pull_request?.url && data.pull_request.url !== tracked.lastPRUrl) {
       const embed = new EmbedBuilder()
         .setTitle('🔗 Pull Request Created')
-        .setColor(0x238636)
+        .setColor(EMBED_COLORS.pr)
         .setDescription(`[View Pull Request](${data.pull_request.url})`)
         .setTimestamp()
-        .setFooter({ text: 'Devin for Discord' });
+        .setFooter({ text: EMBED_FOOTER_TEXT });
       await thread.send({ embeds: [embed] });
       tracked.lastPRUrl = data.pull_request.url;
     }
@@ -191,7 +184,7 @@ export class SessionManager {
         .setColor(display.color)
         .addFields({ name: 'Session', value: `[View in Devin](${tracked.devinUrl})`, inline: true })
         .setTimestamp()
-        .setFooter({ text: 'Devin for Discord' });
+        .setFooter({ text: EMBED_FOOTER_TEXT });
 
       if (data.title) embed.setDescription(data.title);
       if (data.pull_request?.url) {
@@ -202,7 +195,7 @@ export class SessionManager {
 
       if (tracked.statusMessageId) {
         const label = status === 'finished' ? '✅ **Finished**' : '❌ **Expired**';
-        const color = status === 'finished' ? 0x00CC00 : 0xCC0000;
+        const color = status === 'finished' ? EMBED_COLORS.finished : EMBED_COLORS.expired;
         await this.finalizeThinking(tracked, label, color);
       }
 
@@ -219,8 +212,8 @@ export class SessionManager {
       const elapsed = Date.now() - tracked.thinkingStart;
       const embed = new EmbedBuilder()
         .setDescription(`💭 **Devin is thinking...** · ⏱️ ${formatElapsed(elapsed)}`)
-        .setColor(0xFFAA00)
-        .setFooter({ text: 'Devin for Discord' });
+        .setColor(EMBED_COLORS.working)
+        .setFooter({ text: EMBED_FOOTER_TEXT });
       const thread = await this.client.channels.fetch(tracked.threadId);
       const msg = await thread.messages.fetch(tracked.statusMessageId);
       await msg.edit({ embeds: [embed] });
@@ -238,7 +231,7 @@ export class SessionManager {
       const embed = new EmbedBuilder()
         .setDescription(`${label} · ⏱️ ${formatElapsed(elapsed)}`)
         .setColor(color)
-        .setFooter({ text: 'Devin for Discord' });
+        .setFooter({ text: EMBED_FOOTER_TEXT });
       const thread = await this.client.channels.fetch(tracked.threadId);
       const msg = await thread.messages.fetch(tracked.statusMessageId);
       await msg.edit({ embeds: [embed] });
@@ -271,7 +264,7 @@ export class SessionManager {
     if (!tracked) return;
 
     if (tracked.statusMessageId) {
-      await this.finalizeThinking(tracked, '⏹️ **Stopped**', 0xCC0000);
+      await this.finalizeThinking(tracked, '⏹️ **Stopped**', EMBED_COLORS.stopped);
     }
 
     await this.reactOnOriginal(tracked, '⏹️');
