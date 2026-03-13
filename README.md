@@ -1,4 +1,4 @@
-# devin-for-discord
+# devin-for-discord 😊
 
 A Discord bot that brings Devin's autonomous coding capabilities to Discord. Tag `@Devin` or use slash commands to start sessions — the bot creates a dedicated thread and posts real-time progress updates.
 
